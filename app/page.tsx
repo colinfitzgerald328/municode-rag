@@ -12,12 +12,19 @@ type City = {
 type Source = {
   city: string;
   citation: string | null;
+  chapter?: string | null;
+  chapterName?: string | null;
   heading: string | null;
   sectionPath: string | null;
   snippet: string;
   score: number;
 };
-type Answer = { answer: string; sources: Source[] };
+type Answer = {
+  answer: string;
+  sources: Source[];
+  city?: string | null;
+  autoCity?: boolean;
+};
 
 const SUGGESTIONS = [
   "What is the business license tax in Benicia?",
@@ -26,18 +33,78 @@ const SUGGESTIONS = [
   "Do I need a permit to keep chickens in Redding?",
 ];
 
-// wrap section citations (§ 5.06.030, Chapter 1.04) in styled spans
-function renderText(text: string) {
-  const parts = text.split(/(§\s?\d[\d.\-]*|Chapter\s+[\d.]+)/g);
-  return parts.map((p, i) =>
+// Highlight section citations (§ 5.06.030, Chapter 1.04) within a text run.
+function citeSpans(text: string, key: string): React.ReactNode[] {
+  return text.split(/(§\s?\d[\d.\-]*|Chapter\s+[\d.]+)/g).map((p, i) =>
     /^(§|Chapter)/.test(p) ? (
-      <span className="cite" key={i}>
+      <span className="cite" key={`${key}-${i}`}>
         {p}
       </span>
     ) : (
-      <span key={i}>{p}</span>
+      <span key={`${key}-${i}`}>{p}</span>
     )
   );
+}
+
+// Inline Markdown: **bold**, *italic*, plus citation highlighting.
+function renderInline(text: string, key: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const re = /\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let n = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(...citeSpans(text.slice(last, m.index), `${key}-${n++}`));
+    if (m[1] !== undefined)
+      nodes.push(<strong key={`${key}-${n++}`}>{citeSpans(m[1], `${key}-s${n}`)}</strong>);
+    else if (m[2] !== undefined)
+      nodes.push(<em key={`${key}-${n++}`}>{citeSpans(m[2], `${key}-e${n}`)}</em>);
+    else nodes.push(<code key={`${key}-${n++}`}>{m[3]}</code>);
+    last = re.lastIndex;
+  }
+  if (last < text.length) nodes.push(...citeSpans(text.slice(last), `${key}-${n++}`));
+  return nodes;
+}
+
+const LIST_RE = /^\s*([-*+]|\d+[.)])\s+/;
+
+// Minimal block-level Markdown → JSX (headings, lists, paragraphs).
+function renderMarkdown(md: string): React.ReactNode[] {
+  const lines = md.replace(/\r/g, "").split("\n");
+  const out: React.ReactNode[] = [];
+  let i = 0;
+  let k = 0;
+  while (i < lines.length) {
+    if (!lines[i].trim()) {
+      i++;
+      continue;
+    }
+    const h = lines[i].match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const Tag = (`h${Math.min(h[1].length + 2, 6)}` as unknown) as keyof React.JSX.IntrinsicElements;
+      out.push(<Tag key={`b${k++}`}>{renderInline(h[2], `h${k}`)}</Tag>);
+      i++;
+      continue;
+    }
+    if (LIST_RE.test(lines[i])) {
+      const ordered = /^\s*\d+[.)]/.test(lines[i]);
+      const items: string[] = [];
+      while (i < lines.length && LIST_RE.test(lines[i])) {
+        items.push(lines[i].replace(LIST_RE, ""));
+        i++;
+      }
+      const kids = items.map((it, j) => <li key={j}>{renderInline(it, `li${k}-${j}`)}</li>);
+      out.push(ordered ? <ol key={`b${k++}`}>{kids}</ol> : <ul key={`b${k++}`}>{kids}</ul>);
+      continue;
+    }
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() && !LIST_RE.test(lines[i]) && !/^#{1,6}\s/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    out.push(<p key={`b${k++}`}>{renderInline(para.join(" "), `p${k}`)}</p>);
+  }
+  return out;
 }
 
 export default function Home() {
@@ -83,11 +150,11 @@ export default function Home() {
     ask(q);
   }
 
-  // split answer body from the trailing disclaimer line
-  const lines = result?.answer.split(/\n+/).filter(Boolean) ?? [];
-  const disclaimerIdx = lines.findIndex((l) => /not legal advice/i.test(l));
-  const body = disclaimerIdx >= 0 ? lines.slice(0, disclaimerIdx) : lines;
-  const disclaimer = disclaimerIdx >= 0 ? lines[disclaimerIdx] : null;
+  // split answer body (Markdown) from the trailing disclaimer line
+  const raw = result?.answer.trim() ?? "";
+  const dm = raw.match(/\n*\s*[*_>#\s]*not legal advice[^\n]*\s*$/i);
+  const disclaimer = dm ? dm[0].replace(/^[\s*_>#]+/, "").trim() : null;
+  const body = dm ? raw.slice(0, dm.index).trim() : raw;
 
   return (
     <div className={loading ? "loading" : ""}>
@@ -182,10 +249,18 @@ export default function Home() {
           {result && (
             <>
               <div className="answer">
-                <p className="tag">Finding</p>
-                {body.map((p, i) => (
-                  <p key={i}>{renderText(p)}</p>
-                ))}
+                <div className="answer-top">
+                  <p className="tag">Finding</p>
+                  {result.city && (
+                    <span className="scope-badge">
+                      {cityName(cities, result.city)}
+                      {result.autoCity && (
+                        <em> · auto-detected</em>
+                      )}
+                    </span>
+                  )}
+                </div>
+                <div className="prose">{renderMarkdown(body)}</div>
                 {disclaimer && <p className="disclaimer">{disclaimer}</p>}
               </div>
 

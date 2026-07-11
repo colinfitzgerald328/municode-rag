@@ -5,6 +5,8 @@ import { generate } from "./llm";
 export type Source = {
   city: string;
   citation: string | null;
+  chapter: string | null;
+  chapterName: string | null;
   heading: string | null;
   sectionPath: string | null;
   snippet: string;
@@ -25,11 +27,32 @@ function chapterPrefix(citation: string | null): string | null {
   return m ? m[1] : null;
 }
 
+// Auto-detect which jurisdiction a question is about by matching city names
+// (cached from the DB). Returns the slug, or null if none/ambiguous.
+let cityCache: { slug: string; name: string }[] | null = null;
+export async function detectCity(question: string): Promise<string | null> {
+  if (!cityCache) {
+    cityCache = await query<{ slug: string; name: string }>(
+      `SELECT slug, name FROM cities`
+    );
+  }
+  const q = question.toLowerCase();
+  const hits = cityCache.filter((c) => {
+    const name = c.name.toLowerCase();
+    const slugSpaced = c.slug.replace(/-/g, " ");
+    return q.includes(name) || q.includes(slugSpaced);
+  });
+  // Only auto-scope when exactly one city is named (don't guess if ambiguous).
+  return hits.length === 1 ? hits[0].slug : null;
+}
+
 type Row = {
   id: number;
   city_slug: string;
   city: string;
   citation: string | null;
+  chapter: string | null;
+  chapter_name: string | null;
   heading: string | null;
   section_path: string | null;
   content: string;
@@ -39,6 +62,8 @@ type Row = {
 const toSource = (r: Row): Source => ({
   city: r.city,
   citation: r.citation,
+  chapter: r.chapter,
+  chapterName: r.chapter_name,
   heading: r.heading,
   sectionPath: r.section_path,
   snippet: r.content,
@@ -92,8 +117,9 @@ export async function retrieve(
               COALESCE(1.0 / (60 + v.rnk), 0) + COALESCE(1.0 / (60 + f.rnk), 0) AS rrf
        FROM vec v FULL OUTER JOIN fts f ON v.id = f.id
      )
-     SELECT c.id, c.city_slug, ct.name AS city, c.citation, c.heading,
-            c.section_path, c.content, 1 - (c.embedding <=> $1::vector) AS score
+     SELECT c.id, c.city_slug, ct.name AS city, c.citation, c.chapter,
+            c.chapter_name, c.heading, c.section_path, c.content,
+            1 - (c.embedding <=> $1::vector) AS score
      FROM fused
      JOIN chunks c ON c.id = fused.id
      JOIN cities ct ON ct.slug = c.city_slug
@@ -111,7 +137,7 @@ export async function retrieve(
   const seedPairs: { slug: string; pref: string }[] = [];
   const seen = new Set<string>();
   for (const r of ranked) {
-    const pref = chapterPrefix(r.citation);
+    const pref = r.chapter ?? chapterPrefix(r.citation);
     const key = `${r.city_slug}|${pref}`;
     if (pref && !seen.has(key)) {
       seen.add(key);
@@ -126,15 +152,17 @@ export async function retrieve(
     const sp: any[] = [vec];
     const conds = seedPairs
       .map((pr) => {
-        sp.push(pr.slug, `${pr.pref}.`);
-        return `(c.city_slug = $${sp.length - 1} AND c.citation LIKE $${sp.length} || '%')`;
+        sp.push(pr.slug, pr.pref);
+        return `(c.city_slug = $${sp.length - 1} AND c.chapter = $${sp.length})`;
       })
       .join(" OR ");
     const siblings: Row[] = await query(
-      `SELECT c.id, c.city_slug, ct.name AS city, c.citation, c.heading,
-              c.section_path, c.content, 1 - (c.embedding <=> $1::vector) AS score
+      `SELECT c.id, c.city_slug, ct.name AS city, c.citation, c.chapter,
+              c.chapter_name, c.heading, c.section_path, c.content,
+              1 - (c.embedding <=> $1::vector) AS score
        FROM chunks c JOIN cities ct ON ct.slug = c.city_slug
        WHERE (${conds})
+         AND c.citation IS DISTINCT FROM c.chapter   -- skip the chapter-node TOC chunk
        ORDER BY c.city_slug, c.citation
        LIMIT 120`,
       sp
@@ -148,7 +176,7 @@ export async function retrieve(
       const citeKey = `${s.city_slug}|${s.citation}`;
       if (s.citation && seenCite.has(citeKey)) continue;
       seenCite.add(citeKey);
-      const i = gi.get(`${s.city_slug}|${chapterPrefix(s.citation)}`);
+      const i = gi.get(`${s.city_slug}|${s.chapter ?? chapterPrefix(s.citation)}`);
       if (i !== undefined) groups[i].push(s);
     }
     for (let col = 0; extras.length < MAX_EXTRA; col++) {
@@ -168,34 +196,69 @@ export async function retrieve(
 }
 
 const SYSTEM = `You are a careful legal-research assistant answering questions about California municipal codes.
+
+Municipal codes are hierarchical: Title → Chapter → Section. The context is grouped by chapter; the numbered items under each chapter heading are its sibling sections (e.g. § 5.06.030). A complete answer often spans several sections of the same chapter — read them together.
+
 Rules:
 - Answer ONLY using the provided context excerpts. Do not use outside knowledge.
-- Cite the specific section number(s) you rely on, e.g. "(§ 5.06.030)".
+- Cite every section you rely on, e.g. "(§ 5.06.030)". When helpful, name the chapter it belongs to.
+- Format the answer in Markdown: short paragraphs, **bold** for key figures/terms, and bulleted or numbered lists for rates, fees, requirements, or multi-part rules.
+- Quote exact figures, rates, and dates verbatim.
 - If the context does not contain the answer, say so plainly and suggest checking the city's official code site. Do not guess.
-- Be concise and factual. Quote exact figures/dates when relevant.
 - End with one short line: "Not legal advice — verify against the official code."`;
 
 export async function answer(
   question: string,
   opts: { city?: string } = {}
-): Promise<{ answer: string; sources: Source[] }> {
-  const sources = await retrieve(question, { city: opts.city });
+): Promise<{ answer: string; sources: Source[]; city: string | null; autoCity: boolean }> {
+  // Respect an explicit city; otherwise try to infer it from the question.
+  const detected = opts.city ? null : await detectCity(question);
+  const city = opts.city || detected || undefined;
+  const sources = await retrieve(question, { city });
   if (sources.length === 0) {
     return {
       answer:
         "I couldn't find anything in the indexed codes for that. Try rephrasing, or check the city's official code site.",
       sources: [],
+      city: city ?? null,
+      autoCity: !!detected,
     };
   }
-  const context = sources
-    .map(
-      (s, i) =>
-        `[${i + 1}] ${s.city} — ${s.citation ?? s.heading ?? "section"}${
-          s.sectionPath ? ` (${s.sectionPath})` : ""
-        }\n${s.snippet}`
-    )
-    .join("\n\n---\n\n");
-  const user = `Context excerpts from the municipal code(s):\n\n${context}\n\nQuestion: ${question}`;
+  // Group retrieved sections under their City › Chapter so the model sees the
+  // Title → Chapter → Section hierarchy, preserving retrieval order of chapters.
+  const order: string[] = [];
+  const groups = new Map<string, Source[]>();
+  for (const s of sources) {
+    const key = `${s.city}|||${s.chapter ?? ""}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(key);
+    }
+    groups.get(key)!.push(s);
+  }
+  let n = 0;
+  const context = order
+    .map((key) => {
+      const items = groups.get(key)!;
+      const { city, chapter, chapterName } = items[0];
+      const head = chapter
+        ? `${city} — Chapter ${chapter}${chapterName ? `: ${chapterName}` : ""}`
+        : city;
+      const body = items
+        .map((s) => {
+          n += 1;
+          const label = s.citation ? `§ ${s.citation}` : s.heading ?? "section";
+          const name =
+            s.heading && s.citation
+              ? s.heading.replace(s.citation, "").replace(/^[\s.\-–—]+/, "").trim()
+              : "";
+          return `[${n}] ${label}${name ? ` — ${name}` : ""}\n${s.snippet}`;
+        })
+        .join("\n\n");
+      return `### ${head}\n${body}`;
+    })
+    .join("\n\n");
+  const user = `Context excerpts from the municipal code(s), grouped by chapter:\n\n${context}\n\nQuestion: ${question}`;
   const text = await generate(SYSTEM, user);
-  return { answer: text.trim(), sources };
+  return { answer: text.trim(), sources, city: city ?? null, autoCity: !!detected };
 }

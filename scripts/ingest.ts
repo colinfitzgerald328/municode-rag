@@ -76,6 +76,36 @@ async function ingestCity(file: string) {
   console.log(`  done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 
+// Derive the Title → Chapter → Section hierarchy fields the app reasons over:
+//   chapter       — the chapter number, from the section citation (5.06.030 -> 5.06)
+//   chapter_name  — the chapter's title, taken from its chapter-node heading/content
+async function backfillHierarchy() {
+  await pool.query(
+    `UPDATE chunks SET chapter = substring(citation from '^\\d+\\.\\d+')
+     WHERE citation ~ '^\\d+\\.\\d+' AND chapter IS DISTINCT FROM substring(citation from '^\\d+\\.\\d+')`
+  );
+  // Chapter name from the chapter-node heading ("Chapter 3.04 - GENERAL PROVISIONS"),
+  // falling back to the second content line (Municode puts the name there).
+  await pool.query(
+    `WITH chap AS (
+       SELECT city_slug,
+              substring(citation from '^\\d+\\.\\d+') AS chapter,
+              COALESCE(
+                NULLIF(trim(regexp_replace(heading, '^Chapter\\s+[\\d.]+\\s*[-–—:]?\\s*', '', 'i')), ''),
+                NULLIF(regexp_replace((regexp_split_to_array(content, E'\\n'))[2], '\\s*\\d+\\s*$', ''), '')
+              ) AS cname
+       FROM chunks
+       WHERE heading ~* '^Chapter\\s' AND citation ~ '^\\d+\\.\\d+$'
+     )
+     UPDATE chunks c
+     SET chapter_name = initcap(chap.cname)
+     FROM chap
+     WHERE c.city_slug = chap.city_slug AND c.chapter = chap.chapter
+       AND chap.cname IS NOT NULL AND chap.cname !~* '^section'
+       AND length(chap.cname) BETWEEN 3 AND 120`
+  );
+}
+
 async function main() {
   const only = process.argv[2];
   const files = readdirSync(DATA_DIR).filter((f) => f.endsWith(".md"));
@@ -85,6 +115,7 @@ async function main() {
     process.exit(1);
   }
   for (const f of targets) await ingestCity(f);
+  await backfillHierarchy();
 
   const { rows } = await pool.query(
     `SELECT city_slug, count(*)::int AS n FROM chunks GROUP BY city_slug ORDER BY city_slug`

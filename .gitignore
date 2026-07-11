@@ -6,3 +6,7 @@ data/
 *.log
 .DS_Store
 local_cache/
+
+# build artifacts
+tsconfig.tsbuildinfo
+next-env.d.ts
