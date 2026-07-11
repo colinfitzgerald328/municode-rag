@@ -17,7 +17,7 @@ export async function generate(system: string, user: string): Promise<string> {
         { role: "user", content: user },
       ],
       temperature: 0.2,
-      max_completion_tokens: 1400,
+      max_completion_tokens: 1800,
     }),
   });
   if (!res.ok) {

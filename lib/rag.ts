@@ -84,7 +84,7 @@ export async function retrieve(
   question: string,
   opts: { city?: string; k?: number } = {}
 ): Promise<Source[]> {
-  const k = opts.k ?? 8;
+  const k = opts.k ?? 10;
   const vec = toVectorLiteral(await embedQuery(question));
   const tsText = toSearchText(question);
 
@@ -132,8 +132,8 @@ export async function retrieve(
   // distinct hits and pull ALL their sibling sections, then merge round-robin
   // so each relevant chapter contributes evenly (one big chapter can't starve
   // the rest).
-  const EXPAND_CHAPTERS = 3;
-  const MAX_EXTRA = 16;
+  const EXPAND_CHAPTERS = 4;
+  const MAX_EXTRA = 28;
   const seedPairs: { slug: string; pref: string }[] = [];
   const seen = new Set<string>();
   for (const r of ranked) {
