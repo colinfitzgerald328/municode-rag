@@ -80,11 +80,20 @@ async function ingestCity(file: string) {
 //   chapter       — the chapter number, from the section citation (5.06.030 -> 5.06)
 //   chapter_name  — the chapter's title, taken from its chapter-node heading/content
 async function backfillHierarchy() {
+  // Chapter grouping handles both notations:
+  //   dotted     (Benicia/Redding)  5.06.030   -> 5.06   (first two components)
+  //   hyphenated (Tiburon)          16-40.042  -> 16-40  (drop the .section)
+  //                                 10-1       -> 10     (drop the -section)
   await pool.query(
-    `UPDATE chunks SET chapter = substring(citation from '^\\d+\\.\\d+')
-     WHERE citation ~ '^\\d+\\.\\d+' AND chapter IS DISTINCT FROM substring(citation from '^\\d+\\.\\d+')`
+    `UPDATE chunks SET chapter = CASE
+        WHEN citation ~ '-' AND citation ~ '\\.' THEN substring(citation from '^(.+)\\.\\d+[A-Z]?$')
+        WHEN citation ~ '\\.'                     THEN substring(citation from '^\\d+\\.\\d+')
+        WHEN citation ~ '-'                      THEN substring(citation from '^\\d+[A-Z]?')
+        ELSE citation
+     END
+     WHERE citation ~ '^\\d+[A-Z]?[-.]\\d'`
   );
-  // Chapter name from the chapter-node heading ("Chapter 3.04 - GENERAL PROVISIONS"),
+  // Chapter name from a chapter-node heading ("Chapter 3.04 - GENERAL PROVISIONS"),
   // falling back to the second content line (Municode puts the name there).
   await pool.query(
     `WITH chap AS (
@@ -103,6 +112,22 @@ async function backfillHierarchy() {
      WHERE c.city_slug = chap.city_slug AND c.chapter = chap.chapter
        AND chap.cname IS NOT NULL AND chap.cname !~* '^section'
        AND length(chap.cname) BETWEEN 3 AND 120`
+  );
+  // Tiburon-style article headers ("16-40 - Standards for Specific Land Uses"):
+  // the article node's citation equals its sections' derived chapter, so name them.
+  await pool.query(
+    `WITH art AS (
+       SELECT city_slug, citation AS ch,
+              NULLIF(trim(regexp_replace(heading, '^\\S+\\s*[-–—:]\\s*', '')), '') AS cname
+       FROM chunks
+       WHERE heading ~ '^[0-9]+[A-Z]?-[0-9]+ '
+     )
+     UPDATE chunks c
+     SET chapter_name = initcap(art.cname)
+     FROM art
+     WHERE c.city_slug = art.city_slug AND c.chapter = art.ch
+       AND c.chapter_name IS NULL AND art.cname IS NOT NULL
+       AND length(art.cname) BETWEEN 3 AND 120`
   );
 }
 

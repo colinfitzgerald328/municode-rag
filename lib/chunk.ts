@@ -18,6 +18,10 @@ const MAX = 1800; // target chars per chunk
 const MIN = 40; // discard near-empty fragments
 
 function extractCitation(heading: string): string | null {
+  // Municode Title-Chapter.Section style, e.g. "16-40.042", "16-100.020",
+  // "20-5.5", "13A-6" (Tiburon). Checked first so the title prefix is kept.
+  const hyphen = heading.match(/\b(\d+[A-Z]?-\d+(?:\.\d+)*)\b/);
+  if (hyphen) return hyphen[1];
   const dotted = heading.match(/\b(\d+\.\d+(?:\.\d+)?)\b/);
   if (dotted) return dotted[1];
   const named = heading.match(/\b((?:Chapter|Title|Article|Division|Appendix)\s+[\w.]+)/i);
