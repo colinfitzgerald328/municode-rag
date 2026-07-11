@@ -1,4 +1,4 @@
-import { query, queryHnsw } from "./db";
+import { query, queryExact } from "./db";
 import { embedQuery, toVectorLiteral } from "./embed";
 import { generate } from "./llm";
 
@@ -84,7 +84,9 @@ export async function retrieve(
   question: string,
   opts: { city?: string; k?: number } = {}
 ): Promise<Source[]> {
-  const k = opts.k ?? 10;
+  const k = opts.k ?? 12;
+  const EXPAND_CHAPTERS = 4;
+  const MAX_EXTRA = 28;
   const vec = toVectorLiteral(await embedQuery(question));
   const tsText = toSearchText(question);
 
@@ -94,23 +96,22 @@ export async function retrieve(
     params.push(opts.city);
     cityFilter = `AND c.city_slug = $${params.length}`;
   }
-  params.push(k);
-  const limitParam = `$${params.length}`;
 
-  const ranked: Row[] = await queryHnsw(
+  // Wide, EXACT candidate pool with a fused (RRF) score per section. Exact scans
+  // keep this deterministic as the index grows (approximate HNSW was the source
+  // of the instability). We return the whole pool, not a top-k slice.
+  type Cand = Row & { rrf: number };
+  const candidates: Cand[] = await queryExact(
     `WITH vec AS (
        SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> $1::vector) AS rnk
-       FROM chunks c
-       WHERE true ${cityFilter}
-       ORDER BY c.embedding <=> $1::vector
-       LIMIT 100
+       FROM chunks c WHERE true ${cityFilter}
+       ORDER BY c.embedding <=> $1::vector LIMIT 80
      ),
      fts AS (
        SELECT c.id, row_number() OVER (ORDER BY ts_rank(c.tsv, q) DESC) AS rnk
        FROM chunks c, websearch_to_tsquery('english', $2) q
        WHERE c.tsv @@ q ${cityFilter}
-       ORDER BY ts_rank(c.tsv, q) DESC
-       LIMIT 80
+       ORDER BY ts_rank(c.tsv, q) DESC LIMIT 80
      ),
      fused AS (
        SELECT COALESCE(v.id, f.id) AS id,
@@ -119,32 +120,42 @@ export async function retrieve(
      )
      SELECT c.id, c.city_slug, ct.name AS city, c.citation, c.chapter,
             c.chapter_name, c.heading, c.section_path, c.content,
-            1 - (c.embedding <=> $1::vector) AS score
-     FROM fused
-     JOIN chunks c ON c.id = fused.id
+            fused.rrf, 1 - (c.embedding <=> $1::vector) AS score
+     FROM fused JOIN chunks c ON c.id = fused.id
      JOIN cities ct ON ct.slug = c.city_slug
-     ORDER BY fused.rrf DESC
-     LIMIT ${limitParam}`,
+     ORDER BY fused.rrf DESC`,
     params
   );
 
-  // Chapter expansion for the strongest hits. Take the chapters of the top few
-  // distinct hits and pull ALL their sibling sections, then merge round-robin
-  // so each relevant chapter contributes evenly (one big chapter can't starve
-  // the rest).
-  const EXPAND_CHAPTERS = 4;
-  const MAX_EXTRA = 28;
-  const seedPairs: { slug: string; pref: string }[] = [];
-  const seen = new Set<string>();
-  for (const r of ranked) {
-    const pref = r.chapter ?? chapterPrefix(r.citation);
-    const key = `${r.city_slug}|${pref}`;
-    if (pref && !seen.has(key)) {
-      seen.add(key);
-      seedPairs.push({ slug: r.city_slug, pref });
-      if (seedPairs.length >= EXPAND_CHAPTERS) break;
-    }
+  // Primary hits: the strongest individual sections (covers cross-chapter answers).
+  const ranked: Row[] = candidates.slice(0, k);
+
+  // Pick the chapters to expand by AGGREGATE relevance — sum each chapter's
+  // candidate-section scores. In a legal code an answer lives in a chapter, and
+  // the right chapter is confirmed by several sections landing in the pool, not
+  // by one section getting lucky in the ranking. This is what makes retrieval
+  // robust for questions like the business-license rate schedule (§ 5.06.*).
+  const chapHits = new Map<string, number[]>();
+  for (const c of candidates) {
+    const pref = c.chapter ?? chapterPrefix(c.citation);
+    if (!pref) continue;
+    const key = `${c.city_slug}|${pref}`;
+    (chapHits.get(key) ?? chapHits.set(key, []).get(key)!).push(Number(c.rrf));
   }
+  // Score a chapter by its top-3 sections, so a chapter with a few strong hits
+  // (e.g. the noise chapter) beats a big chapter full of weak common-word hits.
+  const chapScore = new Map<string, number>();
+  for (const [key, arr] of chapHits) {
+    arr.sort((a, b) => b - a);
+    chapScore.set(key, arr.slice(0, 3).reduce((s, x) => s + x, 0));
+  }
+  const seedPairs = [...chapScore.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, EXPAND_CHAPTERS)
+    .map(([key]) => {
+      const [slug, pref] = key.split("|");
+      return { slug, pref };
+    });
 
   const rankedIds = new Set(ranked.map((r) => r.id));
   const extras: Row[] = [];

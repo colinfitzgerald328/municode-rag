@@ -19,17 +19,20 @@ export async function query<T = any>(text: string, params?: any[]): Promise<T[]>
   return res.rows as T[];
 }
 
-// Run a query with a raised pgvector HNSW ef_search so filtered nearest-
-// neighbour search stays accurate as the index grows (SET LOCAL needs a txn).
-export async function queryHnsw<T = any>(
+// Run a query with EXACT (brute-force) vector + full-text scans instead of the
+// approximate HNSW index. The corpus is small (~14k rows, ≤4k per city), so an
+// exact scan is fast and — unlike approximate search over a filtered, growing
+// index — fully deterministic. This is what keeps retrieval stable and correct
+// as more cities are ingested. SET LOCAL requires a transaction.
+export async function queryExact<T = any>(
   text: string,
-  params: any[],
-  efSearch = 200
+  params: any[]
 ): Promise<T[]> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SET LOCAL hnsw.ef_search = ${Number(efSearch) | 0}`);
+    await client.query("SET LOCAL enable_indexscan = off");
+    await client.query("SET LOCAL enable_bitmapscan = off");
     const res = await client.query(text, params);
     await client.query("COMMIT");
     return res.rows as T[];
