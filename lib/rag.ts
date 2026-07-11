@@ -218,7 +218,7 @@ export async function answer(
   if (sources.length === 0) {
     return {
       answer:
-        "I couldn't find anything in the indexed codes for that. Try rephrasing, or check the city's official code site.",
+        "Nothing in these codes matched that. Try rephrasing your question, or check the city's official code site.",
       sources: [],
       city: city ?? null,
       autoCity: !!detected,

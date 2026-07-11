@@ -169,18 +169,19 @@ export default function Home() {
               <span>California code lookup</span>
             </div>
           </div>
-          <nav>5 jurisdictions · pgvector</nav>
+          <nav>Five California cities</nav>
         </header>
 
         <section className="hero">
           <p className="eyebrow">Ask the code</p>
           <h1>
-            Plain questions,<br />
-            <em>cited</em> answers.
+            Ask a question.<br />
+            Get the <em>section</em>.
           </h1>
           <p className="lede">
-            Search the full municipal code of five California cities in plain
-            English. Every answer points back to the exact section it came from.
+            Ask about the municipal code of Menlo Park, Tiburon, Brisbane,
+            Redding, or Benicia. Each answer quotes the sections it&rsquo;s
+            based on, so you can check the source yourself.
           </p>
 
           <form className="console" onSubmit={onSubmit}>
@@ -302,11 +303,10 @@ export default function Home() {
             ))}
           </div>
           <p className="colophon">
-            Municipal codes retrieved July 2026. Semantic search over Neon
-            pgvector · local embeddings · answers by Cerebras.
+            Codes retrieved July 2026 from each city&rsquo;s official publisher.
             <br />
-            Convenience tool, not legal advice — verify against each city&rsquo;s
-            official code.
+            A convenience tool, not legal advice — always verify against the
+            city&rsquo;s official code.
           </p>
         </footer>
       </div>
