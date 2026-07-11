@@ -1,4 +1,4 @@
-import { query } from "./db";
+import { query, queryHnsw } from "./db";
 import { embedQuery, toVectorLiteral } from "./embed";
 import { generate } from "./llm";
 
@@ -97,20 +97,20 @@ export async function retrieve(
   params.push(k);
   const limitParam = `$${params.length}`;
 
-  const ranked: Row[] = await query(
+  const ranked: Row[] = await queryHnsw(
     `WITH vec AS (
        SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> $1::vector) AS rnk
        FROM chunks c
        WHERE true ${cityFilter}
        ORDER BY c.embedding <=> $1::vector
-       LIMIT 40
+       LIMIT 100
      ),
      fts AS (
        SELECT c.id, row_number() OVER (ORDER BY ts_rank(c.tsv, q) DESC) AS rnk
        FROM chunks c, websearch_to_tsquery('english', $2) q
        WHERE c.tsv @@ q ${cityFilter}
        ORDER BY ts_rank(c.tsv, q) DESC
-       LIMIT 40
+       LIMIT 80
      ),
      fused AS (
        SELECT COALESCE(v.id, f.id) AS id,
